@@ -1,9 +1,30 @@
+/**
+ * An mqtt chatt client originally connected to a backend written in node.js and using a mosca module as the broker
+ * Author: original authour happiestcoder
+ * source: https://github.com/happiestcoder/mqtt-chat
+ * Licences: The MIT License (MIT)
+ * Copyright: (c) https://github.com/happiestcoder/mqtt-chat
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+ * The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * revision:
+ * 2016-11-27, Sayf Rashid:
+ *      - Changes made as part of the course DIT029 H16 Project: Software Architecture for Distributed Systems in the SEM program in Gothenburg university. 
+ *      - Removing the server, we are going to use the PRATA broker and erlang will be responsible for connecting to the mysql server and handling the chat history. 
+ *      - Implementing all the server functionality(either through an erlang client or finding a variant by using the chat client directly). For example seeing which clients are subscribing to the chatroom.
+ *      - 'old' room where the client can see his the chat history of the specific chat room(an erlang client will responsible of storing and publishing the old messages).
+ *      - Private chat, the ability to directly chat with another client by creating a room comprimising of both their client Ids.
+ *      - Removed manually add user (the user nickname and UUID(which will be the client Id) will be handled elsewhere).
+ */  
+
 (function($){
 
     // create global app parameters...
     var serverAddress = 'broker.mqttdashboard.com', //server ip
         port = 8000, //port
-       mqttClient = null,
+        mqttClient = null,
         nickname = randomString(6),
         currentRoom = null,
    
@@ -48,12 +69,29 @@
         addRoom('old',false,false);
         seUser();
         mqttClient.subscribe(nickname);
+        var msag = new Messaging.Message(JSON.stringify({"_id": currentRoom,  "clientIds": nickname})); 
+            msag.destinationName = 'ConnectingSpot/test';
+            msag.qos = 1;
+            msag.retained = true;
+            mqttClient.send(msag);  
+         
          };
     
         window.onload = function() {
           connect();
-        };
-
+        };   
+       
+jQuery(window).bind(
+    "beforeunload", 
+    function() { 
+        var msag = new Messaging.Message(''); 
+            msag.destinationName = 'ConnectingSpot/test';
+            msag.qos = 1;
+            msag.retained = true;
+            mqttClient.send(msag);
+    }
+)
+   
     function bindDOMEvents(){
         $('.chat-input input').on('keydown', function(e){
             var key = e.which || e.keyCode;
@@ -62,7 +100,7 @@
 
         $('.chat-upload input').on('change', function(){
             var uploadedFiles = this.files;
-            handlePictureUpload(uploadedFiles, function() {
+                handlePictureUpload(uploadedFiles, function() {
                 this.files = undefined;
             });
         });
@@ -94,13 +132,25 @@
             var room = $(this).attr('data-roomId');
          
             if(room != currentRoom){
+               
                 if(currentRoom != '1' && currentRoom != 'old'){
                         removeRoom(currentRoom);
                     }
+                    if(room == 'old'){
+                    mqttClient.unsubscribe(atopicName(currentRoom));
+                    mqttClient.subscribe(atopicName('old'/nickname));
+                    switchRoom(room);
+                    var msg = new Messaging.Message(JSON.stringify({room: atopicName(currentRoom), id: atopicName('old'/nickname)}));
+                        msg.destinationName = 'ConnectingSpot/Database/select';
+                        msg.qos = 1;
+                        mqttClient.send(msg);
+                     
+                }else{
                     mqttClient.unsubscribe(atopicName(currentRoom));
                     mqttClient.subscribe(atopicName(room));
                     
                     switchRoom(room);
+                }
                     
             }
         });
@@ -129,8 +179,7 @@
     function addRoom(name, announce, protected){
         var lockCss = 'display: ' + (protected? 'inline' : 'none');
         if($('.chat-rooms ul li[data-roomId="' + name + '"]').length == 0){
-            $.tmpl(tmplt.room, { room: name, lockCss: lockCss}).appendTo('.chat-rooms ul');
-           
+            $.tmpl(tmplt.room, { room: name, lockCss: lockCss}).appendTo('.chat-rooms ul');  
         }
     }
 
@@ -161,10 +210,10 @@
             text += possible.charAt(Math.floor(Math.random() * possible.length));
         return text;
     }
-
     // handle the client messages
     function handleMessage(){
         if(currentRoom != 'old'){
+       
         var message = $('.chat-input input').val().trim();
         if(message){
             // send the message to the server with the room name
@@ -182,7 +231,7 @@
                 // send the message to the server with the room name
                 var reader = new FileReader();
                 reader.onloadend = function(evt) {
-                    var msg = new Messaging.Message(JSON.stringify({nickname: nickname, message: evt.target.result, type: 'image'}));
+                    var msg = new Messaging.Message(JSON.stringify({nickname: nickname, message: evt.target.result,timestamp: Date.now(), type: 'image'}));
                     msg.destinationName = atopicName(currentRoom);
                     msg.qos = 1;
                     mqttClient.send(msg);
@@ -215,10 +264,6 @@
             context.drawImage(img,0,0,200,180);
         };
         setMessageCss($html, isMe, isServer);
-    }
-    function times(timestamp){
-        var t = new Date(timestamp);
-        return t;
     }
 
     function setMessageCss($html, isMe, isServer){
@@ -268,7 +313,7 @@
             }
         } else {
             if(msg.type == 'image') {
-                insertImage(msg.nickname, msg.message, true, msg.nickname == nickname, false);
+                insertImage(msg.nickname, msg.message, msg.timestamp, msg.nickname == nickname, false);
              
             } else  {
                 insertMessage(msg.nickname, msg.message, msg.timestamp, msg.nickname == nickname, false);
@@ -285,8 +330,6 @@
 
     function switchRoom(room) {
         setCurrentRoom(room);
-        $('.chat-clients ul').empty();
-        addClient({ nickname: nickname, clientId: nickname }, false, true);
         seUser();
     }
 
